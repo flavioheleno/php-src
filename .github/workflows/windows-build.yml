@@ -1,0 +1,102 @@
+name: Windows Build
+
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.gitignore'
+      - '**/*.gitatributes'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.gitignore'
+      - '**/*.gitatributes'
+      - 'docs/**'
+
+env:
+  PHP_BUILD_CACHE_BASE_DIR: C:\build-cache
+  PHP_BUILD_OBJ_DIR: C:\obj
+  PHP_BUILD_CACHE_SDK_DIR: C:\build-cache\sdk
+  PHP_BUILD_SDK_BRANCH: php-sdk-2.2.0
+  PHP_BUILD_CRT: vs16
+  PLATFORM: x64
+
+jobs:
+  pipeline:
+    runs-on: windows-2019
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # thread-safe: [0, 1]
+        thread-safe: [0]
+        include:
+          - thread-safe: 0
+            opcache: 0
+            parallel: -j2
+            intrinsics: ''
+          # - thread-safe: 1
+          #   opcache: 1
+          #   parallel: -j2
+          #   intrinsics: 'AVX'
+
+    env:
+      THREAD_SAFE: ${{ matrix.thread-safe }}
+      OPCACHE: ${{ matrix.opcache }}
+      PARALLEL: ${{ matrix.parallel }}
+      INTRINSICS: ${{ matrix.intrinsics }}
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 64
+      
+      - name: Build PHP
+        shell: cmd
+        run: call .\.github\workflows\windows-build\build.bat
+
+      - name: Setup MySQL
+        run: choco install mysql
+
+      - name: Setup SQLServer
+        run: choco install mssql2014express-defaultinstance -y --allow-empty-checksums
+
+      - name: Start PostgreSQL
+        run: |
+          $postgreSqlSvc = Get-Service "postgresql*"
+          Set-Service $postgreSqlSvc.Name -StartupType manual
+          $postgreSqlSvc.Start()
+          try {
+            (Get-Service "postgresql*").Start()
+          } catch  {
+            $_ | select *
+          }
+
+      - name: Run Test Suite
+        shell: cmd
+        run: call .\.github\workflows\windows-build\test.bat
+
+    # services:
+    #   mysql:
+    #     image: mysql:5.7
+    #     ports:
+    #       - 3306:3306
+    #     env:
+    #       MYSQL_ROOT_PASSWORD: Password12!
+    #       MYSQL_DATABASE: test
+    #   postgres:
+    #     image: postgres:10.1
+    #     ports:
+    #       - 5432:5432
+    #     env:
+    #       POSTGRES_USER: postgres
+    #       POSTGRES_PASSWORD: Password12!
+    #       POSTGRES_DB: test
+    #   mssql:
+    #     image: mcr.microsoft.com/mssql/server:2017-latest
+    #     ports:
+    #       - 1433:1433
+    #     env:
+    #       ACCEPT_EULA: Y
+    #       SA_PASSWORD: Password12!
