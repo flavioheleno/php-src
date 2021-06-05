@@ -399,7 +399,7 @@ static void ZEND_FASTCALL zend_jit_fetch_dim_r_helper(zend_array *ht, zval *dim,
 			offset_key = ZSTR_EMPTY_ALLOC();
 			goto str_index;
 		case IS_DOUBLE:
-			hval = zend_dval_to_lval(Z_DVAL_P(dim));
+			hval = zend_dval_to_lval_safe(Z_DVAL_P(dim));
 			goto num_index;
 		case IS_RESOURCE:
 			zend_error(E_WARNING, "Resource ID#%d used as offset, casting to integer (%d)", Z_RES_HANDLE_P(dim), Z_RES_HANDLE_P(dim));
@@ -464,7 +464,7 @@ static void ZEND_FASTCALL zend_jit_fetch_dim_is_helper(zend_array *ht, zval *dim
 			offset_key = ZSTR_EMPTY_ALLOC();
 			goto str_index;
 		case IS_DOUBLE:
-			hval = zend_dval_to_lval(Z_DVAL_P(dim));
+			hval = zend_dval_to_lval_safe(Z_DVAL_P(dim));
 			goto num_index;
 		case IS_RESOURCE:
 			zend_error(E_WARNING, "Resource ID#%d used as offset, casting to integer (%d)", Z_RES_HANDLE_P(dim), Z_RES_HANDLE_P(dim));
@@ -527,7 +527,7 @@ static int ZEND_FASTCALL zend_jit_fetch_dim_isset_helper(zend_array *ht, zval *d
 			offset_key = ZSTR_EMPTY_ALLOC();
 			goto str_index;
 		case IS_DOUBLE:
-			hval = zend_dval_to_lval(Z_DVAL_P(dim));
+			hval = zend_dval_to_lval_safe(Z_DVAL_P(dim));
 			goto num_index;
 		case IS_RESOURCE:
 			zend_error(E_WARNING, "Resource ID#%d used as offset, casting to integer (%d)", Z_RES_HANDLE_P(dim), Z_RES_HANDLE_P(dim));
@@ -594,7 +594,7 @@ static zval* ZEND_FASTCALL zend_jit_fetch_dim_rw_helper(zend_array *ht, zval *di
 			offset_key = ZSTR_EMPTY_ALLOC();
 			goto str_index;
 		case IS_DOUBLE:
-			hval = zend_dval_to_lval(Z_DVAL_P(dim));
+			hval = zend_dval_to_lval_safe(Z_DVAL_P(dim));
 			goto num_index;
 		case IS_RESOURCE:
 			zend_error(E_WARNING, "Resource ID#%d used as offset, casting to integer (%d)", Z_RES_HANDLE_P(dim), Z_RES_HANDLE_P(dim));
@@ -667,7 +667,7 @@ static zval* ZEND_FASTCALL zend_jit_fetch_dim_w_helper(zend_array *ht, zval *dim
 			offset_key = ZSTR_EMPTY_ALLOC();
 			goto str_index;
 		case IS_DOUBLE:
-			hval = zend_dval_to_lval(Z_DVAL_P(dim));
+			hval = zend_dval_to_lval_safe(Z_DVAL_P(dim));
 			goto num_index;
 		case IS_RESOURCE:
 			zend_error(E_WARNING, "Resource ID#%d used as offset, casting to integer (%d)", Z_RES_HANDLE_P(dim), Z_RES_HANDLE_P(dim));
@@ -736,7 +736,7 @@ try_again:
 			break;
 	}
 
-	return _zval_get_long_func(dim);
+	return zval_get_long_func(dim, /* is_strict */ false);
 }
 
 static zend_always_inline zend_string* zend_jit_fetch_dim_str_offset(zend_string *str, zend_long offset)
@@ -803,7 +803,7 @@ try_string_offset:
 				break;
 		}
 
-		offset = _zval_get_long_func(dim);
+		offset = zval_get_long_func(dim, /* is_strict */ false);
 	} else {
 		offset = Z_LVAL_P(dim);
 	}
@@ -978,6 +978,12 @@ static zend_never_inline void zend_assign_to_string_offset(zval *str, zval *dim,
 
 	if (UNEXPECTED(Z_TYPE_P(dim) != IS_LONG)) {
 		offset = zend_check_string_offset(dim/*, BP_VAR_W*/);
+		if (UNEXPECTED(EG(exception) != NULL)) {
+			if (UNEXPECTED(result)) {
+				ZVAL_UNDEF(result);
+			}
+			return;
+		}
 	} else {
 		offset = Z_LVAL_P(dim);
 	}
@@ -1276,7 +1282,7 @@ isset_str_offset:
 			if (Z_TYPE_P(offset) < IS_STRING /* simple scalar types */
 					|| (Z_TYPE_P(offset) == IS_STRING /* or numeric string */
 						&& IS_LONG == is_numeric_string(Z_STRVAL_P(offset), Z_STRLEN_P(offset), NULL, NULL, false))) {
-				lval = zval_get_long(offset);
+				lval = zval_get_long_ex(offset, /* is_strict */ true);
 				goto isset_str_offset;
 			}
 		}
@@ -1794,19 +1800,28 @@ static zend_property_info *zend_jit_get_prop_not_accepting_double(zend_reference
 	return NULL;
 }
 
-static ZEND_COLD void zend_jit_throw_incdec_ref_error(zend_reference *ref, bool inc)
+static ZEND_COLD void zend_jit_throw_inc_ref_error(zend_reference *ref, zend_property_info *error_prop)
 {
-	zend_property_info *error_prop = zend_jit_get_prop_not_accepting_double(ref);
-	/* Currently there should be no way for a typed reference to accept both int and double.
-	 * Generalize this and the related property code once this becomes possible. */
-	ZEND_ASSERT(error_prop);
+	zend_string *type_str = zend_type_to_string(error_prop->type);
+
 	zend_type_error(
-		"Cannot %s a reference held by property %s::$%s of type %sint past its %simal value",
-		inc ? "increment" : "decrement",
+		"Cannot increment a reference held by property %s::$%s of type %s past its maximal value",
 		ZSTR_VAL(error_prop->ce->name),
 		zend_get_unmangled_property_name(error_prop->name),
-		ZEND_TYPE_ALLOW_NULL(error_prop->type) ? "?" : "",
-		inc ? "max" : "min");
+		ZSTR_VAL(type_str));
+	zend_string_release(type_str);
+}
+
+static ZEND_COLD void zend_jit_throw_dec_ref_error(zend_reference *ref, zend_property_info *error_prop)
+{
+	zend_string *type_str = zend_type_to_string(error_prop->type);
+
+	zend_type_error(
+		"Cannot decrement a reference held by property %s::$%s of type %s past its minimal value",
+		ZSTR_VAL(error_prop->ce->name),
+		zend_get_unmangled_property_name(error_prop->name),
+		ZSTR_VAL(type_str));
+	zend_string_release(type_str);
 }
 
 static void ZEND_FASTCALL zend_jit_pre_inc_typed_ref(zend_reference *ref, zval *ret)
@@ -1819,8 +1834,11 @@ static void ZEND_FASTCALL zend_jit_pre_inc_typed_ref(zend_reference *ref, zval *
 	increment_function(var_ptr);
 
 	if (UNEXPECTED(Z_TYPE_P(var_ptr) == IS_DOUBLE) && Z_TYPE(tmp) == IS_LONG) {
-		zend_jit_throw_incdec_ref_error(ref, 1);
-		ZVAL_COPY_VALUE(var_ptr, &tmp);
+		zend_property_info *error_prop = zend_jit_get_prop_not_accepting_double(ref);
+		if (UNEXPECTED(error_prop)) {
+			zend_jit_throw_inc_ref_error(ref, error_prop);
+			ZVAL_LONG(var_ptr, ZEND_LONG_MAX);
+		}
 	} else if (UNEXPECTED(!zend_verify_ref_assignable_zval(ref, var_ptr, ZEND_CALL_USES_STRICT_TYPES(EG(current_execute_data))))) {
 		zval_ptr_dtor(var_ptr);
 		ZVAL_COPY_VALUE(var_ptr, &tmp);
@@ -1842,8 +1860,11 @@ static void ZEND_FASTCALL zend_jit_pre_dec_typed_ref(zend_reference *ref, zval *
 	decrement_function(var_ptr);
 
 	if (UNEXPECTED(Z_TYPE_P(var_ptr) == IS_DOUBLE) && Z_TYPE(tmp) == IS_LONG) {
-		zend_jit_throw_incdec_ref_error(ref, 0);
-		ZVAL_COPY_VALUE(var_ptr, &tmp);
+		zend_property_info *error_prop = zend_jit_get_prop_not_accepting_double(ref);
+		if (UNEXPECTED(error_prop)) {
+			zend_jit_throw_dec_ref_error(ref, error_prop);
+			ZVAL_LONG(var_ptr, ZEND_LONG_MIN);
+		}
 	} else if (UNEXPECTED(!zend_verify_ref_assignable_zval(ref, var_ptr, ZEND_CALL_USES_STRICT_TYPES(EG(current_execute_data))))) {
 		zval_ptr_dtor(var_ptr);
 		ZVAL_COPY_VALUE(var_ptr, &tmp);
@@ -1863,8 +1884,11 @@ static void ZEND_FASTCALL zend_jit_post_inc_typed_ref(zend_reference *ref, zval 
 	increment_function(var_ptr);
 
 	if (UNEXPECTED(Z_TYPE_P(var_ptr) == IS_DOUBLE) && Z_TYPE_P(ret) == IS_LONG) {
-		zend_jit_throw_incdec_ref_error(ref, 1);
-		ZVAL_COPY_VALUE(var_ptr, ret);
+		zend_property_info *error_prop = zend_jit_get_prop_not_accepting_double(ref);
+		if (UNEXPECTED(error_prop)) {
+			zend_jit_throw_inc_ref_error(ref, error_prop);
+			ZVAL_LONG(var_ptr, ZEND_LONG_MAX);
+		}
 	} else if (UNEXPECTED(!zend_verify_ref_assignable_zval(ref, var_ptr, ZEND_CALL_USES_STRICT_TYPES(EG(current_execute_data))))) {
 		zval_ptr_dtor(var_ptr);
 		ZVAL_COPY_VALUE(var_ptr, ret);
@@ -1879,8 +1903,11 @@ static void ZEND_FASTCALL zend_jit_post_dec_typed_ref(zend_reference *ref, zval 
 	decrement_function(var_ptr);
 
 	if (UNEXPECTED(Z_TYPE_P(var_ptr) == IS_DOUBLE) && Z_TYPE_P(ret) == IS_LONG) {
-		zend_jit_throw_incdec_ref_error(ref, 0);
-		ZVAL_COPY_VALUE(var_ptr, ret);
+		zend_property_info *error_prop = zend_jit_get_prop_not_accepting_double(ref);
+		if (UNEXPECTED(error_prop)) {
+			zend_jit_throw_dec_ref_error(ref, error_prop);
+			ZVAL_LONG(var_ptr, ZEND_LONG_MIN);
+		}
 	} else if (UNEXPECTED(!zend_verify_ref_assignable_zval(ref, var_ptr, ZEND_CALL_USES_STRICT_TYPES(EG(current_execute_data))))) {
 		zval_ptr_dtor(var_ptr);
 		ZVAL_COPY_VALUE(var_ptr, ret);
@@ -1890,6 +1917,13 @@ static void ZEND_FASTCALL zend_jit_post_dec_typed_ref(zend_reference *ref, zval 
 static void ZEND_FASTCALL zend_jit_assign_op_to_typed_ref(zend_reference *ref, zval *val, binary_op_type binary_op)
 {
 	zval z_copy;
+
+	/* Make sure that in-place concatenation is used if the LHS is a string. */
+	if (binary_op == concat_function && Z_TYPE(ref->val) == IS_STRING) {
+		concat_function(&ref->val, &ref->val, val);
+		ZEND_ASSERT(Z_TYPE(ref->val) == IS_STRING && "Concat should return string");
+		return;
+	}
 
 	binary_op(&z_copy, &ref->val, val);
 	if (EXPECTED(zend_verify_ref_assignable_zval(ref, &z_copy, ZEND_CALL_USES_STRICT_TYPES(EG(current_execute_data))))) {
@@ -1925,6 +1959,17 @@ static void ZEND_FASTCALL zend_jit_invalid_property_write(zval *container, const
 
 static void ZEND_FASTCALL zend_jit_invalid_property_incdec(zval *container, const char *property_name)
 {
+	zend_execute_data *execute_data = EG(current_execute_data);
+	const zend_op *opline = EX(opline);
+
+	if (Z_TYPE_P(container) == IS_UNDEF && opline->op1_type == IS_CV) {
+		zend_string *cv = EX(func)->op_array.vars[EX_VAR_TO_NUM(opline->op1.var)];
+
+		zend_error(E_WARNING, "Undefined variable $%s", ZSTR_VAL(cv));
+	}
+	if (opline->result_type & (IS_VAR|IS_TMP_VAR)) {
+		ZVAL_UNDEF(EX_VAR(opline->result.var));
+	}
 	zend_throw_error(NULL,
 		"Attempt to increment/decrement property \"%s\" on %s",
 		property_name, zend_zval_type_name(container));
@@ -2078,6 +2123,14 @@ static void ZEND_FASTCALL zend_jit_assign_op_to_typed_prop(zval *zptr, zend_prop
 	zend_execute_data *execute_data = EG(current_execute_data);
 	zval z_copy;
 
+	ZVAL_DEREF(zptr);
+	/* Make sure that in-place concatenation is used if the LHS is a string. */
+	if (binary_op == concat_function && Z_TYPE_P(zptr) == IS_STRING) {
+		concat_function(zptr, zptr, value);
+		ZEND_ASSERT(Z_TYPE_P(zptr) == IS_STRING && "Concat should return string");
+		return;
+	}
+
 	binary_op(&z_copy, zptr, value);
 	if (EXPECTED(zend_verify_property_type(prop_info, &z_copy, EX_USES_STRICT_TYPES()))) {
 		zval_ptr_dtor(zptr);
@@ -2160,6 +2213,7 @@ static void ZEND_FASTCALL zend_jit_inc_typed_prop(zval *var_ptr, zend_property_i
 	zend_execute_data *execute_data = EG(current_execute_data);
 	zval tmp;
 
+	ZVAL_DEREF(var_ptr);
 	ZVAL_COPY(&tmp, var_ptr);
 
 	increment_function(var_ptr);
@@ -2182,6 +2236,7 @@ static void ZEND_FASTCALL zend_jit_dec_typed_prop(zval *var_ptr, zend_property_i
 	zend_execute_data *execute_data = EG(current_execute_data);
 	zval tmp;
 
+	ZVAL_DEREF(var_ptr);
 	ZVAL_COPY(&tmp, var_ptr);
 
 	decrement_function(var_ptr);
@@ -2208,6 +2263,7 @@ static void ZEND_FASTCALL zend_jit_pre_inc_typed_prop(zval *var_ptr, zend_proper
 		result = &tmp;
 	}
 
+	ZVAL_DEREF(var_ptr);
 	ZVAL_COPY(result, var_ptr);
 
 	increment_function(var_ptr);
@@ -2238,6 +2294,7 @@ static void ZEND_FASTCALL zend_jit_pre_dec_typed_prop(zval *var_ptr, zend_proper
 		result = &tmp;
 	}
 
+	ZVAL_DEREF(var_ptr);
 	ZVAL_COPY(result, var_ptr);
 
 	decrement_function(var_ptr);
@@ -2263,6 +2320,7 @@ static void ZEND_FASTCALL zend_jit_post_inc_typed_prop(zval *var_ptr, zend_prope
 {
 	zend_execute_data *execute_data = EG(current_execute_data);
 
+	ZVAL_DEREF(var_ptr);
 	ZVAL_COPY(result, var_ptr);
 
 	increment_function(var_ptr);
@@ -2283,6 +2341,7 @@ static void ZEND_FASTCALL zend_jit_post_dec_typed_prop(zval *var_ptr, zend_prope
 {
 	zend_execute_data *execute_data = EG(current_execute_data);
 
+	ZVAL_DEREF(var_ptr);
 	ZVAL_COPY(result, var_ptr);
 
 	decrement_function(var_ptr);

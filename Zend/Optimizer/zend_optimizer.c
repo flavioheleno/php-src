@@ -50,19 +50,12 @@ void zend_optimizer_collect_constant(zend_optimizer_ctx *ctx, zval *name, zval* 
 
 int zend_optimizer_eval_binary_op(zval *result, zend_uchar opcode, zval *op1, zval *op2) /* {{{ */
 {
-	binary_op_type binary_op = get_binary_op(opcode);
-	int er, ret;
-
 	if (zend_binary_op_produces_error(opcode, op1, op2)) {
 		return FAILURE;
 	}
 
-	er = EG(error_reporting);
-	EG(error_reporting) = 0;
-	ret = binary_op(result, op1, op2);
-	EG(error_reporting) = er;
-
-	return ret;
+	binary_op_type binary_op = get_binary_op(opcode);
+	return binary_op(result, op1, op2);
 }
 /* }}} */
 
@@ -71,11 +64,7 @@ int zend_optimizer_eval_unary_op(zval *result, zend_uchar opcode, zval *op1) /* 
 	unary_op_type unary_op = get_unary_op(opcode);
 
 	if (unary_op) {
-		if (opcode == ZEND_BW_NOT
-		 && Z_TYPE_P(op1) != IS_LONG
-		 && Z_TYPE_P(op1) != IS_DOUBLE
-		 && Z_TYPE_P(op1) != IS_STRING) {
-			/* produces "Unsupported operand types" exception */
+		if (zend_unary_op_produces_error(opcode, op1)) {
 			return FAILURE;
 		}
 		return unary_op(result, op1);

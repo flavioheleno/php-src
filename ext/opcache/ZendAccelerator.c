@@ -3171,14 +3171,8 @@ static zend_result accel_post_startup(void)
 		 && zend_jit_check_support() == SUCCESS) {
 			size_t page_size;
 
-# ifdef _WIN32
-			SYSTEM_INFO system_info;
-			GetSystemInfo(&system_info);
-			page_size = system_info.dwPageSize;
-# else
-			page_size = getpagesize();
-# endif
-			if (!page_size || (page_size & (page_size - 1))) {
+			page_size = zend_get_page_size();
+			if (!page_size && (page_size & (page_size - 1))) {
 				zend_accel_error_noreturn(ACCEL_LOG_FATAL, "Failure to initialize shared memory structures - can't get page size.");
 				abort();
 			}
@@ -4451,6 +4445,8 @@ static zend_persistent_script* preload_script_in_shared_memory(zend_persistent_s
 	return new_persistent_script;
 }
 
+static zend_result preload_autoload(zend_string *filename);
+
 static void preload_load(void)
 {
 	/* Load into process tables */
@@ -4494,6 +4490,8 @@ static void preload_load(void)
 		memset((void **) ZEND_MAP_PTR_REAL_BASE(CG(map_ptr_base)) + old_map_ptr_last, 0,
 			(CG(map_ptr_last) - old_map_ptr_last) * sizeof(void *));
 	}
+
+	zend_preload_autoload = preload_autoload;
 }
 
 static zend_result preload_autoload(zend_string *filename)
@@ -4847,8 +4845,6 @@ static int accel_preload(const char *config, bool in_child)
 		HANDLE_UNBLOCK_INTERRUPTIONS();
 
 		zend_shared_alloc_destroy_xlat_table();
-
-		zend_preload_autoload = preload_autoload;
 	} else {
 		CG(map_ptr_last) = orig_map_ptr_last;
 	}

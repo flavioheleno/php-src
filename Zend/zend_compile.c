@@ -6466,7 +6466,6 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32_t fall
 	uint32_t i;
 	zend_op_array *op_array = CG(active_op_array);
 	zend_arg_info *arg_infos;
-	zend_string *optional_param = NULL;
 
 	if (return_type_ast || fallback_return_type) {
 		/* Use op_array->arg_info[-1] for return type */
@@ -6487,6 +6486,17 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32_t fall
 			return;
 		}
 		arg_infos = safe_emalloc(sizeof(zend_arg_info), list->children, 0);
+	}
+
+	/* Find last required parameter number for deprecation message. */
+	uint32_t last_required_param = (uint32_t) -1;
+	for (i = 0; i < list->children; ++i) {
+		zend_ast *param_ast = list->child[i];
+		zend_ast *default_ast_ptr = param_ast->child[2];
+		bool is_variadic = (param_ast->attr & ZEND_PARAM_VARIADIC) != 0;
+		if (!default_ast_ptr && !is_variadic) {
+			last_required_param = i;
+		}
 	}
 
 	for (i = 0; i < list->children; ++i) {
@@ -6544,23 +6554,31 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32_t fall
 			zend_const_expr_to_zval(&default_node.u.constant, default_ast_ptr);
 			CG(compiler_options) = cops;
 
-			if (!optional_param) {
+			if (last_required_param != (uint32_t) -1 && i < last_required_param) {
 				/* Ignore parameters of the form "Type $param = null".
 				 * This is the PHP 5 style way of writing "?Type $param", so allow it for now. */
 				bool is_implicit_nullable =
-					type_ast && Z_TYPE(default_node.u.constant) == IS_NULL;
+					type_ast && !(type_ast->attr & ZEND_TYPE_NULLABLE)
+					&& Z_TYPE(default_node.u.constant) == IS_NULL;
 				if (!is_implicit_nullable) {
-					optional_param = name;
+					zend_ast *required_param_ast = list->child[last_required_param];
+					zend_error(E_DEPRECATED,
+						"Optional parameter $%s declared before required parameter $%s "
+						"is implicitly treated as a required parameter",
+						ZSTR_VAL(name), ZSTR_VAL(zend_ast_get_str(required_param_ast->child[1])));
 				}
+
+				/* Regardless of whether we issue a deprecation, convert this parameter into
+				 * a required parameter without a default value. This ensures that it cannot be
+				 * used as an optional parameter even with named parameters. */
+				opcode = ZEND_RECV;
+				default_node.op_type = IS_UNUSED;
+				zval_ptr_dtor(&default_node.u.constant);
 			}
 		} else {
 			opcode = ZEND_RECV;
 			default_node.op_type = IS_UNUSED;
 			op_array->required_num_args = i + 1;
-			if (optional_param) {
-				zend_error(E_DEPRECATED, "Required parameter $%s follows optional parameter $%s",
-					ZSTR_VAL(name), ZSTR_VAL(optional_param));
-			}
 		}
 
 		arg_info = &arg_infos[i];
@@ -6857,6 +6875,7 @@ static void zend_compile_closure_uses(zend_ast *ast) /* {{{ */
 	uint32_t i;
 
 	for (i = 0; i < list->children; ++i) {
+		uint32_t mode = ZEND_BIND_EXPLICIT;
 		zend_ast *var_ast = list->child[i];
 		zend_string *var_name = zend_ast_get_str(var_ast);
 		zval zv;
@@ -6874,7 +6893,11 @@ static void zend_compile_closure_uses(zend_ast *ast) /* {{{ */
 
 		CG(zend_lineno) = zend_ast_get_lineno(var_ast);
 
-		zend_compile_static_var_common(var_name, &zv, var_ast->attr ? ZEND_BIND_REF : 0);
+		if (var_ast->attr) {
+			mode |= ZEND_BIND_REF;
+		}
+
+		zend_compile_static_var_common(var_name, &zv, mode);
 	}
 }
 /* }}} */
@@ -6922,7 +6945,7 @@ zend_string *zend_begin_method_decl(zend_op_array *op_array, zend_string *name, 
 	if (in_interface) {
 		if (!(fn_flags & ZEND_ACC_PUBLIC) || (fn_flags & (ZEND_ACC_FINAL|ZEND_ACC_ABSTRACT))) {
 			zend_error_noreturn(E_COMPILE_ERROR, "Access type for interface method "
-				"%s::%s() must be omitted", ZSTR_VAL(ce->name), ZSTR_VAL(name));
+				"%s::%s() must be public", ZSTR_VAL(ce->name), ZSTR_VAL(name));
 		}
 		op_array->fn_flags |= ZEND_ACC_ABSTRACT;
 	}
@@ -8133,6 +8156,28 @@ static bool zend_try_ct_eval_magic_const(zval *zv, zend_ast *ast) /* {{{ */
 }
 /* }}} */
 
+ZEND_API bool zend_is_op_long_compatible(zval *op)
+{
+	if (Z_TYPE_P(op) == IS_ARRAY) {
+		return false;
+	}
+
+	if (Z_TYPE_P(op) == IS_DOUBLE
+		&& !zend_is_long_compatible(Z_DVAL_P(op), zend_dval_to_lval(Z_DVAL_P(op)))) {
+		return false;
+	}
+
+	if (Z_TYPE_P(op) == IS_STRING) {
+		double dval = 0;
+		zend_uchar is_num = is_numeric_str_function(Z_STR_P(op), NULL, &dval);
+		if (is_num == 0 || (is_num == IS_DOUBLE && !zend_is_long_compatible(dval, zend_dval_to_lval(dval)))) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 ZEND_API bool zend_binary_op_produces_error(uint32_t opcode, zval *op1, zval *op2) /* {{{ */
 {
 	if ((opcode == ZEND_CONCAT || opcode == ZEND_FAST_CONCAT)) {
@@ -8184,6 +8229,12 @@ ZEND_API bool zend_binary_op_produces_error(uint32_t opcode, zval *op1, zval *op
 		return 1;
 	}
 
+	/* Operation which cast float/float-strings to integers might produce incompatible float to int errors */
+	if (opcode == ZEND_SL || opcode == ZEND_SR || opcode == ZEND_BW_OR
+			|| opcode == ZEND_BW_AND || opcode == ZEND_BW_XOR || opcode == ZEND_MOD) {
+		return !zend_is_op_long_compatible(op1) || !zend_is_op_long_compatible(op2);
+	}
+
 	return 0;
 }
 /* }}} */
@@ -8200,10 +8251,10 @@ static inline bool zend_try_ct_eval_binary_op(zval *result, uint32_t opcode, zva
 }
 /* }}} */
 
-bool zend_unary_op_produces_error(uint32_t opcode, zval *op)
+ZEND_API bool zend_unary_op_produces_error(uint32_t opcode, zval *op)
 {
 	if (opcode == ZEND_BW_NOT) {
-		return Z_TYPE_P(op) <= IS_TRUE || Z_TYPE_P(op) == IS_ARRAY;
+		return Z_TYPE_P(op) <= IS_TRUE || !zend_is_op_long_compatible(op);
 	}
 
 	return 0;
@@ -8330,10 +8381,17 @@ static bool zend_try_ct_eval_array(zval *result, zend_ast *ast) /* {{{ */
 				case IS_STRING:
 					zend_symtable_update(Z_ARRVAL_P(result), Z_STR_P(key), value);
 					break;
-				case IS_DOUBLE:
-					zend_hash_index_update(Z_ARRVAL_P(result),
-						zend_dval_to_lval(Z_DVAL_P(key)), value);
+				case IS_DOUBLE: {
+					zend_long lval = zend_dval_to_lval(Z_DVAL_P(key));
+					/* Incompatible float will generate an error, leave this to run-time */
+					if (!zend_is_long_compatible(Z_DVAL_P(key), lval)) {
+						zval_ptr_dtor_nogc(value);
+						zval_ptr_dtor(result);
+						return 0;
+					}
+					zend_hash_index_update(Z_ARRVAL_P(result), lval, value);
 					break;
+				}
 				case IS_FALSE:
 					zend_hash_index_update(Z_ARRVAL_P(result), 0, value);
 					break;
@@ -9235,9 +9293,8 @@ void zend_compile_const(znode *result, zend_ast *ast) /* {{{ */
 
 void zend_compile_class_const(znode *result, zend_ast *ast) /* {{{ */
 {
-	zend_ast *class_ast = ast->child[0];
-	zend_ast *const_ast = ast->child[1];
-
+	zend_ast *class_ast;
+	zend_ast *const_ast;
 	znode class_node, const_node;
 	zend_op *opline;
 

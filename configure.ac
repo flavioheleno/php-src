@@ -258,6 +258,17 @@ case $host_alias in
     ;;
 esac
 
+dnl Detect musl libc
+AC_MSG_CHECKING([whether we are using musl libc])
+if command -v ldd >/dev/null && ldd --version 2>&1 | grep -q ^musl
+then
+  AC_MSG_RESULT(yes)
+  CPPFLAGS="$CPPFLAGS -D__MUSL__"
+else
+  AC_MSG_RESULT(no)
+fi
+
+
 dnl Include Zend configurations.
 dnl ----------------------------------------------------------------------------
 
@@ -1523,6 +1534,9 @@ PHP_SET_LIBTOOL_VARIABLE([--silent])
 
 dnl libtool 1.4.3 needs this.
 PHP_SET_LIBTOOL_VARIABLE([--preserve-dup-deps])
+
+dnl This needs to be passed explicitly to allow scan-build compiler overrides.
+PHP_SET_LIBTOOL_VARIABLE([--tag CC])
 
 test -z "$PHP_COMPILE" && PHP_COMPILE='$(LIBTOOL) --mode=compile $(COMPILE) -c $<'
 test -z "$CXX_PHP_COMPILE" && CXX_PHP_COMPILE='$(LIBTOOL) --mode=compile $(CXX_COMPILE) -c $<'

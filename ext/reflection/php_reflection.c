@@ -1664,6 +1664,55 @@ ZEND_METHOD(ReflectionFunctionAbstract, getClosureScopeClass)
 }
 /* }}} */
 
+/* {{{ Returns an associative array containing the closures lexical scope variables */
+ZEND_METHOD(ReflectionFunctionAbstract, getClosureUsedVariables)
+{
+	reflection_object *intern;
+	const zend_function *closure_func;
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		RETURN_THROWS();
+	}
+	GET_REFLECTION_OBJECT();
+
+	array_init(return_value);
+	if (!Z_ISUNDEF(intern->obj)) {
+		closure_func = zend_get_closure_method_def(Z_OBJ(intern->obj));
+		if (closure_func == NULL ||
+			closure_func->type != ZEND_USER_FUNCTION ||
+			closure_func->op_array.static_variables == NULL) {
+			return;
+		}
+
+		const zend_op_array *ops = &closure_func->op_array;
+
+		HashTable *static_variables = ZEND_MAP_PTR_GET(ops->static_variables_ptr);
+
+		if (!static_variables) {
+			return;
+		}
+
+		zend_op *opline = ops->opcodes + ops->num_args;
+
+		for (; opline->opcode == ZEND_BIND_STATIC; opline++)  {
+			if (!(opline->extended_value & (ZEND_BIND_IMPLICIT|ZEND_BIND_EXPLICIT))) {
+				continue;
+			}
+
+			Bucket *bucket = (Bucket*)
+				(((char*)static_variables->arData) +
+				(opline->extended_value & ~(ZEND_BIND_REF|ZEND_BIND_IMPLICIT|ZEND_BIND_EXPLICIT)));
+
+			if (Z_ISUNDEF(bucket->val)) {
+				continue;
+			}
+
+			zend_hash_add_new(Z_ARRVAL_P(return_value), bucket->key, &bucket->val);
+			Z_TRY_ADDREF(bucket->val);
+		}
+	}
+} /* }}} */
+
 /* {{{ Returns a dynamically created closure for the function */
 ZEND_METHOD(ReflectionFunction, getClosure)
 {
@@ -6824,7 +6873,7 @@ ZEND_METHOD(ReflectionFiber, getFiber)
 }
 
 #define REFLECTION_CHECK_VALID_FIBER(fiber) do { \
-		if (fiber == NULL || fiber->status == ZEND_FIBER_STATUS_INIT || fiber->status & ZEND_FIBER_STATUS_FINISHED) { \
+		if (fiber == NULL || fiber->status == ZEND_FIBER_STATUS_INIT || fiber->status == ZEND_FIBER_STATUS_DEAD) { \
 			zend_throw_error(NULL, "Cannot fetch information from a fiber that has not been started or is terminated"); \
 			RETURN_THROWS(); \
 		} \
@@ -6846,7 +6895,7 @@ ZEND_METHOD(ReflectionFiber, getTrace)
 	prev_execute_data = fiber->stack_bottom->prev_execute_data;
 	fiber->stack_bottom->prev_execute_data = NULL;
 
-	if (EG(current_fiber) != fiber) {
+	if (EG(current_fiber) != zend_fiber_get_context(fiber)) {
 		// No need to replace current execute data if within the current fiber.
 		EG(current_execute_data) = fiber->execute_data;
 	}
@@ -6866,7 +6915,7 @@ ZEND_METHOD(ReflectionFiber, getExecutingLine)
 
 	REFLECTION_CHECK_VALID_FIBER(fiber);
 
-	if (EG(current_fiber) == fiber) {
+	if (EG(current_fiber) == zend_fiber_get_context(fiber)) {
 		prev_execute_data = execute_data->prev_execute_data;
 	} else {
 		prev_execute_data = fiber->execute_data->prev_execute_data;
@@ -6884,7 +6933,7 @@ ZEND_METHOD(ReflectionFiber, getExecutingFile)
 
 	REFLECTION_CHECK_VALID_FIBER(fiber);
 
-	if (EG(current_fiber) == fiber) {
+	if (EG(current_fiber) == zend_fiber_get_context(fiber)) {
 		prev_execute_data = execute_data->prev_execute_data;
 	} else {
 		prev_execute_data = fiber->execute_data->prev_execute_data;
@@ -6899,7 +6948,7 @@ ZEND_METHOD(ReflectionFiber, getCallable)
 
 	ZEND_PARSE_PARAMETERS_NONE();
 
-	if (fiber == NULL || fiber->status & ZEND_FIBER_STATUS_FINISHED) {
+	if (fiber == NULL || fiber->status == ZEND_FIBER_STATUS_DEAD) {
 		zend_throw_error(NULL, "Cannot fetch the callable from a fiber that has terminated"); \
 		RETURN_THROWS();
 	}
